@@ -1,0 +1,403 @@
+-- This is a client based script for Movement.
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+local MoveRemote = ReplicatedStorage.Remotes:WaitForChild("MoveRemote")
+local DashRemote = ReplicatedStorage.Remotes:WaitForChild("DashRemote")
+
+local AnimFolder = ReplicatedStorage:WaitForChild("Animations")
+local WalkAnim = AnimFolder:WaitForChild("Walk")
+local SprintAnim = AnimFolder:WaitForChild("Sprint")
+local LeftDashAnim = AnimFolder:WaitForChild("LeftSideDash")
+local RightDashAnim = AnimFolder:WaitForChild("RightSideDash")
+
+local DashAnimPlayed = true
+
+local basemaximum = 22
+local sprintmaximum = 60
+
+local accelTime = 0.55
+local decelTime = 0.35
+local drag = 10
+local turnassist = 6
+local rotSpeed = 14
+
+local capUpTime = 0.55
+local capDownTime = 0.70
+
+local wallCheckDist = 2.2
+local wallDamp = 0.55
+
+local dashTransparency = 0.7
+local dashBlendHold = 0.07
+
+local humanoid, hrp, animator
+local walkTrack, sprintTrack
+local leftDashTrack, rightDashTrack
+
+local vel = Vector3.zero
+local sprintHeld = false
+local speedCap = basemaximum
+
+local gui, label
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local lastDashEnd = 0
+local dashVisOn = false
+local savedLTM = {}
+
+local dashLocalEnd = 0
+local dashWasActive = false
+
+local function safeUnit(v)
+	if v.Magnitude > 0 then
+		return v.Unit
+	end
+	return Vector3.zero
+end
+
+local function yawOnlyFromLook(pos, look)
+	local f = Vector3.new(look.X, 0, look.Z)
+	if f.Magnitude < 1e-4 then
+		f = Vector3.new(0, 0, -1)
+	else
+		f = f.Unit
+	end
+	return CFrame.lookAt(pos, pos + f, Vector3.yAxis)
+end
+
+local function ensureGui()
+	if gui then return end
+	gui = Instance.new("ScreenGui")
+	gui.Name = "MoveDebug"
+	gui.ResetOnSpawn = false
+	gui.Parent = player:WaitForChild("PlayerGui")
+
+	label = Instance.new("TextLabel")
+	label.Size = UDim2.new(0, 360, 0, 90)
+	label.Position = UDim2.new(0, 12, 0, 12)
+	label.BackgroundTransparency = 0.35
+	label.TextScaled = false
+	label.TextSize = 18
+	label.Font = Enum.Font.SourceSansBold
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextYAlignment = Enum.TextYAlignment.Top
+	label.Parent = gui
+end
+
+local function ensurePlaying()
+	if walkTrack and not walkTrack.IsPlaying then walkTrack:Play(0.12) end
+	if sprintTrack and not sprintTrack.IsPlaying then sprintTrack:Play(0.12) end
+end
+
+local function setLocomotionWeights(walkW, sprintW, t)
+	if walkTrack then walkTrack:AdjustWeight(walkW, t) end
+	if sprintTrack then sprintTrack:AdjustWeight(sprintW, t) end
+end
+
+local function ensureDashTracks()
+	if not animator then return end
+	if not leftDashTrack then
+		leftDashTrack = animator:LoadAnimation(LeftDashAnim)
+		leftDashTrack.Priority = Enum.AnimationPriority.Action
+	end
+	if not rightDashTrack then
+		rightDashTrack = animator:LoadAnimation(RightDashAnim)
+		rightDashTrack.Priority = Enum.AnimationPriority.Action
+	end
+end
+
+local function stopDashAnims(fade)
+	if leftDashTrack and leftDashTrack.IsPlaying then leftDashTrack:Stop(fade or 0.08) end
+	if rightDashTrack and rightDashTrack.IsPlaying then rightDashTrack:Stop(fade or 0.08) end
+end
+
+local function playDashAnim(key)
+	if not DashAnimPlayed then return end
+	ensureDashTracks()
+	stopDashAnims(0.03)
+	if key == "A" and leftDashTrack then
+		leftDashTrack:Play(0.03)
+	elseif key == "D" and rightDashTrack then
+		rightDashTrack:Play(0.03)
+	end
+end
+
+local function setDashTransparencyEnabled(on)
+	if not hrp or not hrp.Parent then return end
+	local char = hrp.Parent
+	if on then
+		if dashVisOn then return end
+		dashVisOn = true
+		table.clear(savedLTM)
+		for _, inst in ipairs(char:GetDescendants()) do
+			if inst:IsA("BasePart") then
+				savedLTM[inst] = inst.LocalTransparencyModifier
+				inst.LocalTransparencyModifier = math.clamp(dashTransparency, 0, 1)
+			end
+		end
+	else
+		if not dashVisOn then return end
+		dashVisOn = false
+		for part, old in pairs(savedLTM) do
+			if part and part.Parent then
+				part.LocalTransparencyModifier = old
+			end
+		end
+		table.clear(savedLTM)
+	end
+end
+
+local function getDashKeyNow()
+	if UIS:IsKeyDown(Enum.KeyCode.A) then return "A" end
+	if UIS:IsKeyDown(Enum.KeyCode.D) then return "D" end
+	return nil
+end
+
+local function onCharacterAdded(char)
+	humanoid = char:WaitForChild("Humanoid")
+	hrp = char:WaitForChild("HumanoidRootPart")
+	animator = humanoid:WaitForChild("Animator")
+
+	rayParams.FilterDescendantsInstances = { char }
+
+	walkTrack = animator:LoadAnimation(WalkAnim)
+	walkTrack.Priority = Enum.AnimationPriority.Action
+	walkTrack.Looped = true
+
+	sprintTrack = animator:LoadAnimation(SprintAnim)
+	sprintTrack.Priority = Enum.AnimationPriority.Action
+	sprintTrack.Looped = true
+
+	walkTrack:Play(0.12)
+	sprintTrack:Play(0.12)
+	walkTrack:AdjustWeight(0, 0)
+	sprintTrack:AdjustWeight(0, 0)
+
+	leftDashTrack, rightDashTrack = nil, nil
+
+	vel = Vector3.zero
+	speedCap = basemaximum
+	lastDashEnd = 0
+	dashLocalEnd = 0
+	dashWasActive = false
+
+	setDashTransparencyEnabled(false)
+	stopDashAnims(0)
+
+	ensureGui()
+end
+
+player.CharacterAdded:Connect(onCharacterAdded)
+if player.Character then onCharacterAdded(player.Character) end
+
+UIS.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		sprintHeld = true
+	end
+end)
+
+UIS.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		sprintHeld = false
+	end
+end)
+
+UIS.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode ~= Enum.KeyCode.Q then return end
+	if not hrp then return end
+
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+
+	local key = getDashKeyNow()
+	if not key then return end
+
+	local camRight = safeUnit(Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z))
+	local dir = (key == "A") and (-camRight) or camRight
+	dir = safeUnit(dir)
+
+	DashRemote:FireServer(key, dir)
+	playDashAnim(key)
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	if not hrp or not hrp.Parent then return end
+	local char = hrp.Parent
+
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+
+	local camForward = safeUnit(Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z))
+	local camRight = safeUnit(Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z))
+
+	local dir = Vector3.zero
+	if UIS:IsKeyDown(Enum.KeyCode.W) then dir += camForward end
+	if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= camForward end
+	if UIS:IsKeyDown(Enum.KeyCode.D) then dir += camRight end
+	if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= camRight end
+	dir = safeUnit(dir)
+
+	local canSprint = player:GetAttribute("CanSprint")
+	if canSprint == nil then canSprint = true end
+	local sprinting = (sprintHeld or UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift)) and canSprint
+	local moving = dir.Magnitude > 0
+
+	ensurePlaying()
+
+	local dashEnd = char:GetAttribute("DashEnd")
+	local dashVel = char:GetAttribute("DashVel")
+	local dashDX = char:GetAttribute("DashDX")
+	local dashDZ = char:GetAttribute("DashDZ")
+	local dashKeyAttr = char:GetAttribute("DashKey")
+
+	local now = workspace:GetServerTimeNow()
+	local dashing = typeof(dashEnd) == "number" and now < dashEnd
+
+	if dashing and typeof(dashEnd) == "number" then
+		dashLocalEnd = math.max(dashLocalEnd, dashEnd + dashBlendHold)
+	end
+	local dashVisualActive = now < dashLocalEnd
+
+	if typeof(dashEnd) == "number" and dashEnd ~= lastDashEnd then
+		lastDashEnd = dashEnd
+	end
+
+
+	if dashVisualActive and not dashWasActive then
+		dashWasActive = true
+		setLocomotionWeights(0, 0, 0.03)
+		setDashTransparencyEnabled(true)
+
+		local key = (typeof(dashKeyAttr) == "string") and dashKeyAttr or "A"
+		if key == "A" or key == "D" then
+			playDashAnim(key)
+		end
+	elseif (not dashVisualActive) and dashWasActive then
+		dashWasActive = false
+		setDashTransparencyEnabled(false)
+		stopDashAnims(0.08)
+	end
+
+	if not dashVisualActive then
+		setDashTransparencyEnabled(false)
+		if not moving then
+			setLocomotionWeights(0, 0, 0.12)
+		else
+			if sprinting then
+				setLocomotionWeights(0, 1, 0.12)
+			else
+				setLocomotionWeights(1, 0, 0.12)
+			end
+		end
+	end
+
+
+	local desiredCap = sprinting and sprintmaximum or basemaximum
+	local capTau = (desiredCap > speedCap) and capUpTime or capDownTime
+	local capAlpha = 1 - math.exp(-dt / math.max(capTau, 1e-3))
+	speedCap += (desiredCap - speedCap) * capAlpha
+
+	local targetVel = dir * speedCap
+
+	if dashVisualActive and typeof(dashVel) == "number" and typeof(dashDX) == "number" and typeof(dashDZ) == "number" then
+		local dashDir = safeUnit(Vector3.new(dashDX, 0, dashDZ))
+		vel = Vector3.new(dashDir.X * dashVel, vel.Y, dashDir.Z * dashVel)
+	else
+		if moving then
+			local t = targetVel - vel
+			local isAccel = t:Dot(targetVel) > 0
+			local tau = isAccel and accelTime or decelTime
+			local alpha = 1 - math.exp(-dt / math.max(tau, 1e-3))
+			vel += t * alpha
+
+			local h = Vector3.new(vel.X, 0, vel.Z)
+			local hMag = h.Magnitude
+			if hMag > 0 then
+				local currentDir = h.Unit
+				local blend = math.clamp(turnassist * dt, 0, 1)
+				local newDir = safeUnit(currentDir:Lerp(dir, blend))
+				h = newDir * hMag
+				vel = Vector3.new(h.X, vel.Y, h.Z)
+			end
+		else
+			local h0 = Vector3.new(vel.X, 0, vel.Z)
+			h0 -= h0 * math.clamp(drag * dt, 0, 1)
+			vel = Vector3.new(h0.X, vel.Y, h0.Z)
+		end
+
+		local h1 = Vector3.new(vel.X, 0, vel.Z)
+		if h1.Magnitude > sprintmaximum then
+			h1 = h1.Unit * sprintmaximum
+			vel = Vector3.new(h1.X, vel.Y, h1.Z)
+		end
+	end
+
+
+	do
+		local h = Vector3.new(vel.X, 0, vel.Z)
+		if h.Magnitude > 1 then
+			local castDir = h.Unit * wallCheckDist
+			local origin = hrp.Position + Vector3.new(0, 1.5, 0)
+			local hit = workspace:Raycast(origin, castDir, rayParams)
+			if hit and hit.Normal then
+				local n = Vector3.new(hit.Normal.X, 0, hit.Normal.Z)
+				if n.Magnitude > 0 then
+					n = n.Unit
+					local into = h:Dot(n)
+					if into < 0 then
+						h = h - n * into
+						h *= wallDamp
+						vel = Vector3.new(h.X, vel.Y, h.Z)
+					end
+				end
+			end
+		end
+	end
+
+	hrp.AssemblyLinearVelocity = Vector3.new(vel.X, hrp.AssemblyLinearVelocity.Y, vel.Z)
+	hrp.AssemblyAngularVelocity = Vector3.zero
+
+
+	if not dashVisualActive then
+		local rotAlpha = 1 - math.exp(-rotSpeed * dt)
+		local shiftLock = (UIS.MouseBehavior == Enum.MouseBehavior.LockCenter)
+		if shiftLock then
+			hrp.CFrame = hrp.CFrame:Lerp(yawOnlyFromLook(hrp.Position, camForward), rotAlpha)
+		else
+			local h2 = Vector3.new(vel.X, 0, vel.Z)
+			if h2.Magnitude > 1 then
+				hrp.CFrame = hrp.CFrame:Lerp(yawOnlyFromLook(hrp.Position, h2.Unit), rotAlpha)
+			end
+		end
+	end
+
+
+	do
+		local _, y, _ = hrp.CFrame:ToOrientation()
+		hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, y, 0)
+	end
+
+	
+	if label then
+		local spd = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z).Magnitude
+		label.Text = ("Speed: %.1f\nCap: %.1f  Desired: %.0f%s"):format(
+			spd,
+			speedCap,
+			desiredCap,
+			dashVisualActive and " (DASH)" or ""
+		)
+	end
+
+	MoveRemote:FireServer(dir, sprinting)
+end)
