@@ -1,0 +1,59 @@
+-- This is the server side script for my movement system.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local DashRemote = ReplicatedStorage.Remotes:WaitForChild("DashRemote")
+
+local dashTime = 0.18
+local dashCD = 0.9
+local sideDashDistance = 45
+
+local function initCharacter(plr, char)
+	local hum = char:WaitForChild("Humanoid", 5)
+	if hum then
+		hum.WalkSpeed = 0
+		hum.JumpPower = 0
+		hum.AutoRotate = false
+		hum.PlatformStand = false
+	end
+
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part:SetNetworkOwner(plr)
+		end
+	end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+	plr:SetAttribute("NextDashTime", 0)
+	plr.CharacterAdded:Connect(function(char)
+		initCharacter(plr, char)
+	end)
+end)
+
+DashRemote.OnServerEvent:Connect(function(plr, dashKey, dashDir)
+	if dashKey ~= "A" and dashKey ~= "D" then return end
+
+	local char = plr.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local now = workspace:GetServerTimeNow()
+	local nextDash = plr:GetAttribute("NextDashTime") or 0
+	if now < nextDash then return end
+	plr:SetAttribute("NextDashTime", now + dashCD)
+
+	local dir = Vector3.zero
+	if typeof(dashDir) == "Vector3" then
+		dir = Vector3.new(dashDir.X, 0, dashDir.Z)
+	end
+	if dir.Magnitude == 0 then return end
+	dir = dir.Unit
+
+	char:SetAttribute("DashKey", dashKey)
+	char:SetAttribute("DashEnd", now + dashTime)
+	char:SetAttribute("DashDX", dir.X)
+	char:SetAttribute("DashDZ", dir.Z)
+	char:SetAttribute("DashVel", sideDashDistance / dashTime)
+end)
