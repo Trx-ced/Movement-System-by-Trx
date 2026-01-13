@@ -1,0 +1,101 @@
+-- This script manages stamina for my scripts.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local MoveRemote = Remotes:WaitForChild("MoveRemote")
+local StaminaRemote = Remotes:WaitForChild("StaminaRemote")
+
+local staminamax = 285
+
+local StaminaDrain = 15
+local RegenStamina = 12
+
+local ExhaustLock = 20
+local ExhaustRelease = 36
+
+local state = {}
+
+Players.PlayerAdded:Connect(function(plr)
+	plr:SetAttribute("MaxStamina", staminamax)
+	plr:SetAttribute("Stamina", staminamax)
+	plr:SetAttribute("CanSprint", true)
+
+	state[plr] = {
+		sprinting = false,
+		moving = false,
+		exhausted = false,
+	}
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+	state[plr] = nil
+end)
+
+MoveRemote.OnServerEvent:Connect(function(plr, dir, sprinting)
+	local s = state[plr]
+	if not s then return end
+	if typeof(dir) ~= "Vector3" then return end
+
+	s.sprinting = sprinting and true or false
+	s.moving = (Vector3.new(dir.X, 0, dir.Z).Magnitude > 0.05)
+end)
+
+local sendAccum = 0
+
+RunService.Heartbeat:Connect(function(dt)
+	sendAccum += dt
+
+	for plr, s in pairs(state) do
+		local stam = plr:GetAttribute("Stamina") or staminamax
+		local max = plr:GetAttribute("MaxStamina") or staminamax
+
+		local now = workspace:GetServerTimeNow()
+		local char = plr.Character
+		local dashEndAttr = char and char:GetAttribute("DashEnd")
+		local isDashing = (typeof(dashEndAttr) == "number") and (now < dashEndAttr)
+
+		if s.sprinting and not s.exhausted and s.moving then
+			stam -= StaminaDrain * dt
+			if stam <= ExhaustLock then
+				stam = math.max(stam, 0)
+				s.exhausted = true
+			end
+		end
+
+		if s.exhausted then
+			plr:SetAttribute("CanSprint", false)
+
+			if (not s.sprinting) and (not isDashing) then
+				local regenRate = s.moving and (RegenStamina * 0.5) or RegenStamina
+				stam += regenRate * dt
+				if stam >= ExhaustRelease then
+					s.exhausted = false
+				end
+			end
+		else
+			if (not s.sprinting) and (not isDashing) then
+				local regenRate = s.moving and (RegenStamina * 0.5) or RegenStamina
+				stam += regenRate * dt
+			end
+
+			plr:SetAttribute("CanSprint", stam > ExhaustLock)
+		end
+
+		if stam < 0 then stam = 0 end
+		if stam > max then stam = max end
+
+		plr:SetAttribute("Stamina", stam)
+
+		if sendAccum >= 0.1 then
+			local pct = (max > 0) and math.clamp(stam / max, 0, 1) or 0
+			StaminaRemote:FireClient(plr, pct, stam, max)
+		end
+	end
+
+	if sendAccum >= 0.1 then
+		sendAccum = 0
+	end
+end)
